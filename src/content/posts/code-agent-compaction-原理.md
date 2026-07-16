@@ -8,11 +8,11 @@ category: AI
 draft: false
 ---
 
-Code agent（Claude Code、Codex、opencode、crush、pi，以及 Cline、Amp、MemGPT/Letta）在长会话里都会遇到上下文窗口不够用的问题。常见的说法叫"上下文压缩"（context compaction），但这个说法太窄了。
+Code agent 在长会话里都会遇到上下文窗口不够用的问题。Claude Code、Codex、opencode、crush、pi，加上 Cline、Amp、MemGPT/Letta，做法各不相同。常见的说法叫"上下文压缩"（context compaction），但这个说法太窄了。
 
-压缩只是表象。真正的问题是：**在一个有限的 context window 里，怎么维持一个长时间运行的 agent 的语义一致性、任务连续性和状态连续性。** 压缩只是这个大问题里的一个子环节。
+压缩只是表象。真正的问题是：在一个有限的 context window 里，怎么维持一个长时间运行的 agent 的语义一致性、任务连续性和状态连续性。压缩只是其中一个子环节。
 
-这篇讲完整的设计空间：为什么要压缩、哪些要压缩哪些不压缩、系统提示词怎么设计、工具链路怎么保证、状态怎么保存恢复、语义一致性怎么维持、prompt cache 怎么不破坏。[第二篇](/posts/code-agent-compaction-源码实现/)逐个拆 5 个项目的源码，[实践篇](/posts/code-agent-compaction-实践/)从零实现一个最小压缩。
+这篇讲设计空间：为什么要压缩、哪些压缩哪些不压缩、系统提示词怎么设计、工具链路怎么保证、状态怎么保存恢复、语义一致性怎么维持、prompt cache 怎么不破坏。[第二篇](/posts/code-agent-compaction-源码实现/)拆 5 个项目的源码，[实践篇](/posts/code-agent-compaction-实践/)从零实现一个最小压缩。
 
 ## 上下文里到底有什么
 
@@ -50,13 +50,11 @@ Output Budget 也不压缩，但它的存在影响压缩阈值：Claude Code 的
 
 ## 为什么要压缩
 
-四个原因，后两个最容易忽略。
-
 **Context window 有限。** 200K token 听起来很多，但读一个 500 行文件约 2000 token，grep 返回 50 条结果约 5000 token，改几处代码加上 diff 约 3000 token。十几轮工具调用就填满了。
 
-**Token 成本是 O(n²) 增长。** 每次请求都把完整历史发过去。第 1 轮发 1 条，第 2 轮发 2 条，第 N 轮发 N 条。N 轮的总量是 1+2+...+N = N(N+1)/2。不压缩的话，跑到第 50 轮总消耗是 1275 条消息的量。
+**Token 成本是 O(n²) 增长。** 每次请求都把完整历史发过去。第 1 轮发 1 条，第 2 轮发 2 条，第 N 轮发 N 条。N 轮的总量是 1+2+...+N = N(N+1)/2。跑到第 50 轮就是 1275 条消息的量。
 
-**Prompt cache 跟压缩的关系。** 这是最容易被忽略的：
+**Prompt cache 跟压缩的关系。** 这个容易被忽略：
 
 ```mermaid
 flowchart LR
@@ -101,7 +99,7 @@ flowchart LR
 
 ## 压缩的设计空间
 
-上下文压缩要回答七个问题，不是三个：
+上下文压缩要回答七个问题，不只是三个：
 
 ```mermaid
 flowchart TB
@@ -115,7 +113,7 @@ flowchart TB
     ROOT --> Q7["7. 语义一致性怎么维持？<br/>（任务不漂移、cache 不断裂）"]
 ```
 
-很多人只关注前三个（触发/算法/保留），但后面四个才是区分"能用"和"好用"的关键。下面逐个展开。
+前三个（触发/算法/保留）是基础，后面四个才是区分"能用"和"好用"的关键。
 
 ## 1. 什么时候触发
 
@@ -899,4 +897,4 @@ Err(e @ CodexErr::ContextWindowExceeded) => {
 
 **15. 用户消息有特权。** Codex 原样保留近期 user 消息，opencode 重播最后一条 user 消息，其他项目至少不动用户纯文本。用户消息是最不能丢的信息，工具结果可以总结，assistant 回复可以概括，但用户的原始指令必须完整保留。
 
-下一篇逐个拆源码实现。
+下一篇拆源码实现。
