@@ -851,6 +851,147 @@ Context Poisoning 跟压缩的关系最微妙。压缩本来是为了"清理"，
 
 选择摘要模型的考量因素：成本 > 速度 > 忠实度 > 推理能力。摘要不需要推理，需要忠实保留信息。
 
+## 滑窗式 stub 替换 = 每步缓存失效
+
+这是腾讯技术团队文章（*横向拆解 Claude Code、Codex 等六大 Agent 上下文压缩策略后，我们做了第 7 个*）最有价值的原创发现。
+
+### 问题是什么
+
+最小实现的 `findCutPoint` 用滑动窗口：每次压缩都从尾部向前累加 token，找切点。这意味着每加 2 条新消息（一个 assistant + 一个 tool result），滑动窗口的边界就移动一格，之前保留的一条 tool result 被挤出窗口，替换成 stub `'[Old tool result content cleared]'`。
+
+问题在于：消息内容变了（从完整内容变成 stub），整个 prompt prefix 从那个位置开始全部失效，prompt cache miss。
+
+### 真实成本数据
+
+腾讯文章给出了一个具体案例：一个 4 轮、177 步、59 分钟的 session 花了 $77.3，其中 **83%（$64.8）全是 cache_write**。
+
+cache_write 的单价是 cache_read 的 12.5 倍。Langfuse 的 step 级数据显示，从第 7 步开始 prefix cache 就死了，后面 50+ 步每步都在为"窗口移了一格"买单。
+
+### 为什么滑动窗口特别有害
+
+每完成一步（加 2 条消息），滑动窗口就会把 1 条之前保留的旧 tool result 挤出窗口，它的字节从"完整内容"变成"stub"。从那条消息开始，整个 prompt prefix 全部 cache miss。
+
+```
+Step N:   [stub] [stub] [tool_result_A] [tool_result_B] [新消息]
+                                            ↑ cache prefix 到这里
+
+Step N+1: [stub] [stub] [stub] [tool_result_B] [新消息] [新消息]
+                                    ↑ cache prefix 从这里重新开始
+                                      tool_result_A 变成 stub 了，prefix 断了
+```
+
+每步都断一次，每步都全量 cache_write。
+
+### 解决方案：单调推进的边界
+
+规则：**stub 决策必须单调推进，只跳不滑。** 一旦某个部分被标记为 stub，在所有后续 turn/step 中都保持 stub，不再变化。
+
+```typescript
+// 错误做法：滑动窗口，每步重新计算
+function findCutPoint_sliding(messages, config) {
+  // 每次都从尾部向前找，窗口边界会移
+  // 之前保留的消息可能被挤出窗口变成 stub -> cache miss
+}
+
+// 正确做法：单调推进，只标记不取消
+const stubbedPartIds = new Set<string>();  // 持久化
+
+function findCutPoint_monotonic(messages, config) {
+  // 新消息加入后，只把"新挤出的"标记为 stub
+  // 已经是 stub 的保持 stub，不变
+  // cache prefix 从最后一个 stub 的位置开始，稳定不变
+}
+```
+
+Claude Code 的 `cache_edits` API 天然满足这个约束：客户端字节不变，删除决策在服务端生效，prefix 不动。腾讯文章的 ReplacementCache（Redis 存每个 part ID 的截断决策，TTL 30 分钟）也实现了同样的单调性：跨 turn 甚至跨 Pod 重启，同一个 part 始终长一个样。
+
+### 对最小实现的影响
+
+最小实现的 `findCutPoint` 每次压缩都重新计算，在长会话多次压缩时会遇到这个问题。修复方法：维护一个 `stubbedPartIds` 集合，记录哪些 tool result 已经被清理过。后续压缩时只新增 stub，不修改已有的。
+
+## Anthropic 的服务端压缩 API
+
+Claude Code 除了客户端的 microCompact 和 fork agent，还有两条服务端压缩路径，这些在[源码篇](/posts/code-agent-compaction-源码实现/)里没有展开。
+
+### cached_microcompact（cache_edits）
+
+把"删除旧 tool results"包装成 API 级的 `cache_edits` 指令。客户端字节不变，服务端在 cached prefix 上雕刻（carve），删除指定的 tool result。
+
+这跟最小实现的 microCompact 思路一样，但实现方式不同。最小实现修改本地消息内容（替换成 stub），会破坏 cache prefix。cache_edits 不修改本地内容，只让服务端在 cache 层面删除，prefix 不动。
+
+### apiMicrocompact（context_management API）
+
+调用 Anthropic 的 context_management API beta（`context-management-2025-06-27`），服务端自动按 input_tokens 阈值裁剪旧 tool calls。客户端完全不参与裁剪决策，全交给服务端。
+
+这个 API 也在 Vertex AI 和 Amazon Bedrock 上可用。
+
+## 四级水位线设计
+
+腾讯文章提出了一个四级水位线的预防性维护设计，比最小实现的单阈值触发更精细。
+
+### 为什么不能只靠单阈值
+
+最小实现在 `contextWindow - reserveTokens`（约 80-90%）时触发压缩。但研究表明，上下文填充超过 70% 时，模型就开始出现中间上下文遗忘（mid-context amnesia）和指令漂移（instruction drift）。
+
+也就是说，等你到 80% 才压缩，模型已经"犯困"了。压缩不只是为了省 token，更是为了保护模型的注意力。腾讯文章把这个概念叫 **Context Rot（上下文腐烂）**。
+
+### 四级水位线
+
+| 水位线 | 触发 | 操作 | 调 LLM | 破坏 cache |
+|---|---|---|---|---|
+| Tier 0 | < 60% | 什么都不做 | 否 | 否 |
+| Tier 1 | 60-80% | Snip：截断旧工具输出（保留前几行 + 工具名 + "X results omitted"） | 否 | 否 |
+| Tier 2 | 80-95% | Prune：Tier-1 截断的 -> 完全占位符 `[Content compacted]`，截断旧 assistant 文本 | 否 | 否 |
+| Tier 3 | >= 95% | Summarize：增量 LLM 摘要 | 是 | 是 |
+
+关键特性：**Tier 是累积的，不是互斥的。** Tier 3 触发时，Tier 1+2 的截断已经做过了，Tier 3 只处理 Tier 1+2 搞不定的部分。
+
+### 为什么 Snip 在 Prune 之前
+
+Snip 保留更多元数据（"我之前 grep 过这个文件"），Prune 是完全擦除。先 Snip 再 Prune，让模型在 Tier 1 阶段还有"我做过什么"的线索，到 Tier 2 才完全丢失。如果直接 Prune，模型突然发现"我做过什么"的记录全没了，可能重复之前的操作。
+
+### 红线：什么都不能动
+
+四个红线，任何 Tier 都不能触碰：
+1. 保护区域消息（近期几轮的完整对话）
+2. 用户纯文本
+3. PROTECTED_TOOLS 的输出（如 Skill、Task）
+4. compactionProtected 标记的部分
+
+如果保护区域都救不了（红线内的内容本身就超窗口了），怎么办？**让上下文真的爆，比错误压缩导致模型行为漂移好。** 这是一个重要的设计哲学：宁可让 API 返回 overflow 错误让用户知道出了问题，也不要静默地错误压缩导致模型开始做奇怪的事情。
+
+## Context Rot：压缩的本质是保护注意力
+
+腾讯文章的结尾有一段值得引用的话：
+
+> 上下文压缩的目标从来不是省 token（那只是附带效果），而是保护模型的注意力。200K 窗口听起来很大，但研究反复表明，填充超过 70% 就会出现明显的中间上下文遗忘和指令漂移。模型不是在"遗忘"，而是注意力被稀释了，信号被噪声淹没。一个合格的压缩系统是信号工程师。每一轮真正的问题是：这轮模型应该关注什么？
+
+这个视角改变了压缩的设计目标。不是"token 快满了才压缩"，而是"模型注意力快分散了就开始维护"。这也是四级水位线在 60% 就开始 Tier 1 Snip 的原因：不是为了省 token，是为了在模型开始犯困之前把噪声清掉。
+
+## 更多产品的压缩策略
+
+腾讯文章还对比了几个我们系列没覆盖的产品：
+
+**Cline**：`/smol`（别名 `/compact`）手动 + Auto-Compact 自动双模式。Focus Chain（v3.25 默认）让 todo list 在压缩后存活，作为进度锚点。
+
+**Amp（Sourcegraph）**：反向立场，拒绝递归总结（引用 OpenAI 内部研究关于递归总结的渐进退化），用 `/handoff` 开新线程替代压缩。线程是一等公民（`@@` 引用，`threads:map` 可视化）。2026 Neo CLI 加了 90% 自动管理作为妥协。
+
+**MemGPT / Letta**：OS 内存层级模型。Main Context = RAM（始终在 prompt 里），Recall Memory = swap（完整历史，`conversation_search`），Archival Memory = disk（无限向量存储，`archival_memory_search`）。关键区别：分页由 agent 自己通过函数调用决定，不是被动截断。Letta v0.16.7（2026-03），22.5k GitHub stars。
+
+### 压缩共识原则
+
+腾讯文章从 6 个产品的实践中提炼出 7 条共识：
+
+1. **分层递进，不是一刀切**（Tier 0/1/2/3）
+2. **严格升序成本**（便宜的字符串截断/占位符在前，贵的 LLM 摘要在后）
+3. **增量摘要 > 全量摘要**（维护一个活摘要，每次只合并新部分；避免"摘要的摘要"语义漂移）
+4. **用真实 token，不要估算**（`usage.totalTokens` 免费/精确/唯一可信；`text.length/3` 只适用于内部排序）
+5. **用户消息有特权**（Codex 原样保留，opencode 重播最后一条，其他至少不动用户纯文本）
+6. **保护近端**（最近几轮不动；常见做法：保护最近 8000 token）
+7. **单调边界，不要滑动窗口**（2026-05-13 补充：stub 决策只增不减，保证 cache prefix 稳定）
+
+第 4 条值得注意。最小实现用的是 `chars/4` 估算 token，文章指出这对中英混合内容有 30-50% 的误差。具体案例：估算 70% 但实际 92%，下一轮直接 overflow。文章的建议是：估算只用于内部排序，触发决策必须用 LLM API 返回的真实 `usage.totalTokens`。
+
 ## 完整代码
 
 完整代码在 `G:/ai-project/ai-paper/compaction-demo/context-compaction.ts`，约 300 行，无外部依赖。`npx tsx context-compaction.ts` 直接运行。
@@ -884,3 +1025,7 @@ Context Poisoning 跟压缩的关系最微妙。压缩本来是为了"清理"，
 - Mem0, *Context engineering in multi-turn AI agents*
 - Karpathy, "context engineering" 定义（被广泛引用）
 - *The God Agent Mistake: Why one mega-agent always fails in production*
+
+### 深度对比文章
+- 腾讯技术工程 / mervynyang, *横向拆解 Claude Code、Codex 等六大 Agent 上下文压缩策略后，我们做了第 7 个*, 2026-06-08. https://mp.weixin.qq.com/s/BQwyvE2qIfguwKk63F3LZw
+- Letta (MemGPT), *Agent Memory* 文档, v0.16.7
