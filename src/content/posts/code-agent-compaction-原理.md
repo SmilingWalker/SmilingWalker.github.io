@@ -8,11 +8,11 @@ category: AI
 draft: false
 ---
 
-Code agent（Claude Code、Codex、opencode、crush、pi）在长会话里都会遇到上下文窗口不够用的问题。常见的说法叫"上下文压缩"（context compaction），但这个说法太窄了。
+Code agent（Claude Code、Codex、opencode、crush、pi，以及 Cline、Amp、MemGPT/Letta）在长会话里都会遇到上下文窗口不够用的问题。常见的说法叫"上下文压缩"（context compaction），但这个说法太窄了。
 
 压缩只是表象。真正的问题是：**在一个有限的 context window 里，怎么维持一个长时间运行的 agent 的语义一致性、任务连续性和状态连续性。** 压缩只是这个大问题里的一个子环节。
 
-这篇讲完整的设计空间：为什么要压缩、哪些要压缩哪些不压缩、系统提示词怎么设计、工具链路怎么保证、状态怎么保存恢复、语义一致性怎么维持、prompt cache 怎么不破坏。[第二篇](/posts/code-agent-compaction-源码实现/)逐个拆 5 个项目的源码。
+这篇讲完整的设计空间：为什么要压缩、哪些要压缩哪些不压缩、系统提示词怎么设计、工具链路怎么保证、状态怎么保存恢复、语义一致性怎么维持、prompt cache 怎么不破坏。[第二篇](/posts/code-agent-compaction-源码实现/)逐个拆 5 个项目的源码，[实践篇](/posts/code-agent-compaction-实践/)从零实现一个最小压缩。
 
 ## 上下文里到底有什么
 
@@ -50,7 +50,7 @@ Output Budget 也不压缩，但它的存在影响压缩阈值：Claude Code 的
 
 ## 为什么要压缩
 
-三个原因，第三个最容易忽略。
+四个原因，后两个最容易忽略。
 
 **Context window 有限。** 200K token 听起来很多，但读一个 500 行文件约 2000 token，grep 返回 50 条结果约 5000 token，改几处代码加上 diff 约 3000 token。十几轮工具调用就填满了。
 
@@ -85,8 +85,19 @@ flowchart LR
 各项目的做法：
 - Claude Code 用 fork agent 复用主会话的 cache prefix
 - Claude Code 的 microCompact 用 `cache_edits` API 在不破坏 cache 前缀的前提下删旧工具结果
+- Claude Code 还有服务端 API：`apiMicrocompact` 调用 context_management beta（`context-management-2025-06-27`），服务端自动裁剪旧 tool calls，客户端完全不参与
 - Codex 的 `remove_first_item` 从最旧处删（保留前面的 cache）
 - Claude Code 有 sticky-on latch 防止 beta header 翻转破坏 cache
+
+**滑窗式 stub 替换 = 每步缓存失效。** 这是腾讯技术团队发现的一个反直觉问题。如果压缩用滑动窗口（每次从尾部向前找切点），每加 2 条新消息就把 1 条之前保留的 tool result 挤出窗口变成 stub。消息内容变了，整个 prompt prefix 从那个位置开始 cache miss。
+
+真实成本数据：一个 4 轮、177 步的 session 花了 $77.3，其中 83%（$64.8）全是 cache_write。cache_write 单价是 cache_read 的 12.5 倍。从第 7 步开始 prefix cache 就死了，后面 50+ 步每步都在为"窗口移了一格"买单。
+
+解决方案：stub 决策必须单调推进，只增不减。一旦某个部分被标记为 stub，后续所有 turn 都保持 stub 不变。Claude Code 的 `cache_edits` API 天然满足这个约束（客户端字节不变，服务端在 cache 层面删除）。腾讯的 ReplacementCache（Redis 存截断决策，TTL 30 分钟）也实现了同样的单调性。
+
+**Context Rot：保护注意力，不是省 token。** 压缩的目标从来不只是省 token，而是保护模型的注意力。研究表明，上下文填充超过 70% 时，模型就开始出现中间上下文遗忘（mid-context amnesia）和指令漂移（instruction drift）。200K 窗口听起来很大，但 >70% 填充时信号被噪声淹没，模型不是在"遗忘"，而是注意力被稀释了。
+
+这意味着压缩不应该等到 90% 才触发，而应该在 60-70% 就开始预防性维护。腾讯的四级水位线设计（Tier 0/1/2/3 at 60/80/95%）就体现了这个理念：60% 开始轻量截断（Snip），80% 加重截断（Prune），95% 才调 LLM 摘要（Summarize）。每一轮真正的问题是：这轮模型应该关注什么？
 
 ## 压缩的设计空间
 
@@ -237,6 +248,23 @@ flowchart TB
 | opencode | 预发送估算 | window-max(output,20K) | ~160K (80%) | 确保请求不超限，最保守 |
 | crush | 剩余 token | 剩余<20K | ~180K (90%) | 保证模型有输出空间 |
 | pi | 占比+buffer | window-16K | ~184K (92%) | 平衡点 |
+
+### 多级水位线：预防性维护 vs 应急压缩
+
+上面的项目都是单阈值触发（token 到了某个点才压缩）。但腾讯的四级水位线设计提出了一个不同的思路：不要等爆了才压缩，应该在 60% 就开始预防性维护。
+
+| 水位线 | 触发 | 操作 | 调 LLM | 破坏 cache |
+|---|---|---|---|---|
+| Tier 0 | < 60% | 什么都不做 | 否 | 否 |
+| Tier 1 | 60-80% | Snip：截断旧工具输出（保留前几行 + "X results omitted"） | 否 | 否 |
+| Tier 2 | 80-95% | Prune：Tier-1 截断的 -> 完全占位符，截断旧 assistant 文本 | 否 | 否 |
+| Tier 3 | >= 95% | Summarize：增量 LLM 摘要 | 是 | 是 |
+
+为什么 60% 就开始？因为 Context Rot 在 70% 就开始了。等 90% 才压缩，模型已经"犯困"了好几轮。Tier 1 的 Snip 是轻量操作（不调 LLM、不破坏 cache），在 60% 就把噪声清掉，让模型保持注意力集中。
+
+Tier 是累积的，不是互斥的：Tier 3 触发时，Tier 1+2 的截断已经做过了，Tier 3 只处理剩余部分。
+
+这个设计也跟 Claude Code 的三层递进（microCompact -> sessionMemory -> compactConversation）思路一致，但 Claude Code 的三层是"都到了阈值才递进"，腾讯的四级是"不同水位线触发不同操作"。
 
 ## 2. 怎么压缩
 
@@ -820,14 +848,26 @@ Err(e @ CodexErr::ContextWindowExceeded) => {
 | 工具链路 | 三套 delta + deferred tools 快照 | 每步重建 ToolRouter | 每轮 materialize | 每轮重建 | 不在压缩范围 |
 | 状态管理 | 12+ 项保存/恢复 | world_state + RFC 7386 merge patch | system-context epoch | todos 外置 | 文件操作 XML 追踪 |
 | 摘要 prompt | 9 节 + analysis 草稿 + 防漂移引用 | handoff summary | 锚定摘要（增量更新） | 全量摘要（无限制） | 结构化 + split-turn 双摘要 |
-| cache 策略 | fork agent + cache_edits + sticky latch + 断裂检测 | remove_first_item 保留 prefix | - | - | - |
+| cache 策略 | fork agent + cache_edits + sticky latch + 断裂检测 + 服务端 context_management API | remove_first_item 保留 prefix | - | - | - |
 | 扩展性 | PreCompact/PostCompact/SessionStart hooks | - | - | - | session_before_compact 可替换 |
 | 压缩层次 | 三层递进 | 三路分派 | 单层 | 单层 | 单层 |
 | 增量更新 | 否 | 否 | 是 | 否 | 是 |
 | 溢出恢复 | PTL 重试 3次 | remove_first_item | defect 抛掷 1次 | 无 | 1次 |
 | 熔断 | 连续失败3次 | 无 | 无 | 无 | 无 |
 
+### 更多产品的压缩策略
+
+除了上面 5 个项目，还有几个值得关注的：
+
+**Cline**：`/smol`（别名 `/compact`）手动 + Auto-Compact 自动双模式。Focus Chain（v3.25 默认）让 todo list 在压缩后存活，作为进度锚点。Cline 的特色是把 todo 作为"压缩后不可丢的锚"，类似 crush 的 todos 外置但实现方式不同。
+
+**Amp（Sourcegraph）**：反向立场，拒绝递归总结。引用 OpenAI 内部研究关于递归总结的渐进退化，认为"长对话本身就是问题，切换线程比压缩更好"。用 `/handoff` 把当前线程的关键点打包到新线程，用户可以审查和编辑后再交接。线程是一等公民（`@@` 引用，`threads:map` 可视化）。2026 Neo CLI 加了 90% 自动管理作为妥协。
+
+**MemGPT / Letta**：OS 内存层级模型。Main Context = RAM（始终在 prompt 里），Recall Memory = swap（完整历史，`conversation_search`），Archival Memory = disk（无限向量存储，`archival_memory_search`）。关键区别：分页由 agent 自己通过函数调用决定，不是被动截断。Letta v0.16.7（2026-03），22.5k GitHub stars。代价是架构复杂，需要外部向量存储，有检索延迟。
+
 ## 核心设计模式
+
+从 8 个项目（Claude Code, Codex, opencode, crush, pi, Cline, Amp, MemGPT）的实践和腾讯技术团队的总结里，能提炼出以下共识和设计模式：
 
 **1. "delta 优于全量"。** Claude Code 的三套 delta 机制、Codex 的 merge patch、opencode 的 epoch reconcile，都是用增量通知替代全量重算。变化不频繁的东西用 delta，避免破坏昂贵的 prompt cache。
 
@@ -835,7 +875,7 @@ Err(e @ CodexErr::ContextWindowExceeded) => {
 
 **3. 状态拆分成独立维度。** Claude Code 把连续性拆成 7+ 个独立维度（对话语义、工具可用性、文件上下文、计划/skill/异步任务、cache 经济性、链结构、可扩展性），每个维度有专门的保存/恢复通道。不把所有状态塞进一个摘要。
 
-**4. 切点不能落在 tool result 中间。** 5 个项目都保证 tool call 和 tool result 成对保留。这是 API 的硬性约束。
+**4. 切点不能落在 tool result 中间。** 所有项目都保证 tool call 和 tool result 成对保留。这是 API 的硬性约束。
 
 **5. 摘要里必须有"下一步"。** 防止压缩后任务漂移。Claude Code 最严格，要求逐字引用用户原始措辞。
 
@@ -848,5 +888,15 @@ Err(e @ CodexErr::ContextWindowExceeded) => {
 **9. 压缩是"新会话开始"语义。** Claude Code 的 SessionStart hook 以 `'compact'` 触发，opencode 的 epoch `replace`，Codex 的 `start_new_context_window`，都把压缩当作一次"重启"，而不是"继续"。
 
 **10. 不信任服务端回传的指令内容。** Codex 的 `should_keep_compacted_history_item` 丢弃服务端回传的 developer 消息，因为可能 stale/duplicated。压缩后从当前 session 重新生成权威 canonical context。
+
+**11. 单调边界，不要滑动窗口。** 滑窗式 stub 替换每步都改变消息内容，导致 cache prefix 断裂。stub 决策必须单调推进，只增不减。Claude Code 的 cache_edits 和腾讯的 ReplacementCache 都满足这个约束。
+
+**12. 压缩的本质是保护注意力，不是省 token。** Context Rot 在 70% 填充时就开始。压缩应该在 60% 就开始预防性维护（Snip），而不是等 90% 才应急压缩。每一轮真正的问题是：这轮模型应该关注什么？
+
+**13. 用真实 token，不要估算。** `text.length/4` 对中英混合内容有 30-50% 误差。估算只适用于内部排序，触发决策应该用 LLM API 返回的真实 `usage.totalTokens`。腾讯文章记录了一个案例：估算 70% 但实际 92%，下一轮直接 overflow。
+
+**14. 分层递进，严格升序成本。** 便宜的字符串截断/占位符在前，贵的 LLM 摘要在后。Claude Code 的三层递进和腾讯的四级水位线都遵循这个原则。先试代价低的，不够再升级。
+
+**15. 用户消息有特权。** Codex 原样保留近期 user 消息，opencode 重播最后一条 user 消息，其他项目至少不动用户纯文本。用户消息是最不能丢的信息，工具结果可以总结，assistant 回复可以概括，但用户的原始指令必须完整保留。
 
 下一篇逐个拆源码实现。
