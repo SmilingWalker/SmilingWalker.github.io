@@ -3,6 +3,7 @@ import GoogleAnalytics from "@components/analytics/GoogleAnalytics.astro";
 import La51Analytics from "@components/analytics/La51Analytics.astro";
 import MicrosoftClarity from "@components/analytics/MicrosoftClarity.astro";
 import UmamiAnalytics from "@components/analytics/UmamiAnalytics.astro";
+import GoatCounter from "@components/analytics/GoatCounter.astro";
 import FancyboxManager from "@components/features/FancyboxManager.astro";
 import FontSetup from "@components/features/FontSetup.astro";
 import MusicManager from "@components/features/MusicManager.astro";
@@ -117,6 +118,7 @@ const siteLang = lang.replace("_", "-");
             screenRecord={analyticsConfig.la51Analytics?.screenRecord}
             />
     )}
+    <GoatCounter />
 
     <title>{pageTitle}</title>
     <meta
