@@ -290,7 +290,7 @@ func main() {
 }
 ```
 
-## 你天天在用
+## 标准库里的落地
 
 策略模式不是需要"引入"的东西，标准库里到处是它：
 
@@ -302,7 +302,18 @@ sort.Slice(products, func(i, j int) bool {
 })
 ```
 
-**`http.RoundTripper`。** `http.Client` 的传输层是一个接口，`DefaultTransport` 是默认策略；要加重试、代理、Mock 测试，换一个 `RoundTripper` 实现，`Client` 的代码不动。
+**`http.RoundTripper`。** `http.Client` 的传输层是一个接口，`DefaultTransport` 是默认策略；换实现不换 `Client`：
+
+```go
+// net/http —— 标准库原文
+type RoundTripper interface {
+	RoundTrip(*Request) (*Response, error)
+}
+```
+
+要加重试、代理、Mock 测试，换一个 `RoundTripper` 实现，`Client` 的代码不动。测试里用 `httptest.Server` 配自定义 transport 替掉真实网络，换的正是这个策略。
+
+两个值得记下的设计细节。**其一，无状态策略可以安全复用**：`FullReduction` 这类不携带字段的策略是只读的，做成包级变量全局共享即可，并发调用没有问题——这接上[第 3 篇单例](/posts/design-patterns-3-单例/)的结论：策略对象是"不可变单例"的天然候选，`http.DefaultTransport` 本身就是一个全局共享的策略实例。**其二，策略的粒度由调用方接口决定**：`sort.Slice` 只需要"比较"这一个动作，策略就是一个函数；CloudShop 的促销需要"算价 + 报互斥组"两个动作，策略才升级为接口。从调用方需要的最小接口反推策略形状，而不是先设计一个"完整"接口再找地方用。
 
 ## 业务实战：真实大厂的策略落地
 

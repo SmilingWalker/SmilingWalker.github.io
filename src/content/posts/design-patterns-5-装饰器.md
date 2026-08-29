@@ -161,7 +161,7 @@ flowchart TB
 | 数据流 | 每个策略独立算，引擎汇总 | 每层消费上一层的输出 |
 | 典型问题 | 互斥择优 | 叠加顺序 |
 
-## 你天天在用
+## 标准库里的落地
 
 **`io.Reader` 套娃——标准库里最著名的一串洋葱。**
 
@@ -172,6 +172,19 @@ zr, err := gzip.NewReader(br)   // 加解压层
 ```
 
 `bufio.Reader` 实现了 `io.Reader`，内部包着另一个 `io.Reader`；`gzip.Reader` 又包着它。加缓冲、加解压、加限速（`io.LimitReader`）、加校验，全是往上包洋葱——`gzip` 的代码不知道也不关心自己包的是文件还是网络连接。这就是为什么 Go 的 IO 库能像积木一样拼。
+
+而标准库里最小的两个装饰器，源码只有几行——装饰器在 Go 的廉价程度可见一斑：
+
+```go
+// io/io.go —— 真实源码
+func LimitReader(r Reader, n int64) Reader { return &LimitedReader{R: r, N: n} }
+
+func TeeReader(r Reader, w Writer) Reader {
+	return &teeReader{r, w}
+}
+```
+
+`LimitReader` 给任意 Reader 加"最多读 N 字节"，`TeeReader` 给 Reader 加"读的同时抄送一份到 Writer"（`tail -f` 式的日志分流用它一行就成）。两个结构体、一个字段转发——**装饰器的成本是一个结构体加一个方法**，这是它在 Go 里遍地开花的根本原因。
 
 **`http.Handler` 中间件。**
 

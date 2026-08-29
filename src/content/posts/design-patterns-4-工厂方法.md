@@ -118,15 +118,39 @@ flowchart LR
     R --> H[OrderHandler 实现]
 ```
 
-## 你天天在用
+## 标准库里的落地
 
 Go 标准库把这个模式用成了基础设施级惯例：
 
-**`database/sql` 的 `sql.Register`。** 写过 `_ "github.com/go-sql-driver/mysql"` 吗？这个 blank import 的唯一作用是执行驱动包的 `init()`，里面调用 `sql.Register("mysql", &MySQLDriver{})` 把自己注册进全局驱动表。`sql.Open("mysql", dsn)` 查表拿驱动——`sql.Open` 从不知道 mysql 的存在。加新数据库 = 加一个 import，标准库零改动。
+**`database/sql` 的 `sql.Register`。** 驱动包通过 blank import（`_ "github.com/go-sql-driver/mysql"`）触发 `init()`，里面调用 `sql.Register("mysql", &MySQLDriver{})` 把自己注册进全局驱动表。`sql.Open("mysql", dsn)` 查表拿驱动——`sql.Open` 从不知道 mysql 的存在。加新数据库 = 加一个 import，标准库零改动。
 
-**`image.RegisterFormat`。** png、jpeg、gif 各自的包在 `init()` 里注册格式名和解码器，`image.Decode` 靠注册表识别格式。你 `import _ "image/png"` 的那一刻，就是在参与一次工厂注册。
+`sql.Register` 的实现值得贴——注册表工厂的全部要素，标准库只用了十行不到：
 
-**你写过的每一个 blank import，都是一次安静的工厂调用。**
+```go
+// database/sql/sql.go —— 真实源码（节选）
+var (
+	driversMu sync.Mutex
+	drivers   = make(map[string]driver.Driver)
+)
+
+func Register(name string, driver driver.Driver) {
+	driversMu.Lock()
+	defer driversMu.Unlock()
+	if driver == nil {
+		panic("sql: Register driver is nil")
+	}
+	if _, dup := drivers[name]; dup {
+		panic("sql: Register called twice for driver " + name)
+	}
+	drivers[name] = driver
+}
+```
+
+三个细节都是生产级注册表的必修课：**互斥锁**（多个包的 `init()` 理论上可并发触发的防御）；**nil 驱动直接 panic**（注册期失败优于运行期诡异错误——与[第 3 篇](/posts/design-patterns-3-单例/)Must 惯例同一哲学：启动期大声失败）；**重复注册 panic**（两个包注册同名"mysql"是明确的装配错误，静默覆盖会把问题推迟到深夜的线上）。
+
+**`image.RegisterFormat`。** png、jpeg、gif 各自的包在 `init()` 里注册格式名、魔数和解码器，`image.Decode` 靠注册表识别格式。`import _ "image/png"` 的那一刻，就是在参与一次工厂注册。
+
+**每一个 blank import，都是一次安静的工厂调用。**
 
 ## 业务实战：美团的策略工厂
 

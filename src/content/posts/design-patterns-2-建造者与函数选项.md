@@ -189,7 +189,7 @@ flowchart LR
     E -->|统一校验| C
 ```
 
-## 你天天在用
+## 标准库里的落地
 
 **`strings.Builder`。** 名字同源但侧重不同：它是"分步组装字符串、最后一次产出"，避免 `+=` 的反复拷贝——建造者"分步构建、终态产出"的核心节奏。
 
@@ -201,6 +201,21 @@ sql := b.String() // 构建完成
 ```
 
 **`grpc.Dial`。** Functional Options 在真实库里的样子：`grpc.Dial(addr, grpc.WithInsecure(), grpc.WithBlock())`，每个 `With` 都是一个 Option 函数。
+
+grpc-go 的 `DialOption` 还藏着一招值得单独学——**密封接口（sealed interface）**：
+
+```go
+// grpc-go clientconn.go —— 真实源码
+type DialOption interface {
+	apply(*dialOptions) // 未导出方法
+}
+
+type funcDialOption struct{ f func(*dialOptions) }
+
+func (fdo *funcDialOption) apply(do *dialOptions) { fdo.f(do) }
+```
+
+`apply` 是未导出方法，**包外无人能实现 `DialOption` 接口**——选项集合被密封在包内，外部只能通过 `With...` 构造选项，不能伪造。如果任何人都能实现 Option，调用方就可能注入未文档化的行为，库的演进失去控制。密封接口是 Functional Options 走向公共 API 时的标配手法，代价是选项扩展权完全收归库作者。
 
 ## 业务实战
 

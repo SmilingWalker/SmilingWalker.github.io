@@ -147,13 +147,31 @@ var cityBlacklist = mustParseCities("city_blacklist.conf") // 启动即解析，
 | 有状态 / 会变 / 需要测试替换 | 显式注入，别用单例 |
 | 并发安全的重资源（连接池） | 造一次，传着用（见下） |
 
-## 你天天在用
+## 标准库里的落地
 
 **`http.DefaultClient` / `http.DefaultTransport`。** 标准库里真实的包级单例：全进程共享的默认客户端和传输器。注意它们的命运恰恰是反面教材——因为全局共享又难以替换，社区（包括 Go 官方文档）长期建议生产代码自己持有 `http.Client` 而不是用 `DefaultClient`（它没有超时）。单例的问题在这个例子里完整演示了一遍。
 
-**`regexp.MustCompile` / `template.Must`。** 不可变单例的 Must 惯例：包级声明、启动时初始化、永不修改。这两个函数你一定写过。
+**`regexp.MustCompile` / `template.Must`。** 不可变单例的 Must 惯例：包级声明、启动时初始化、永不修改。项目里几乎都有它们的身影。
 
-**`database/sql` 的连接池。** `sql.DB` 是并发安全的重资源，符合"单例"的形态——但标准库的设计是**你调 `sql.Open` 拿到它，然后作为依赖传递**，而不是藏在一个全局函数后面。造一次、传着用，这就是"单例的资源、非单例的用法"。
+**`database/sql` 的连接池。** `sql.DB` 是并发安全的重资源，符合"单例"的形态——但标准库的设计是**调用方 `sql.Open` 拿到它，然后作为依赖传递**，而不是藏在一个全局函数后面。造一次、传着用，这就是"单例的资源、非单例的用法"。
+
+**`sync.OnceValue` / `sync.OnceFunc`（Go 1.21+）。** 懒加载单例的现代一行式。前面 v3 那套 `var once sync.Once` + 包级变量的样板，现在是一个泛型函数：
+
+```go
+var getBlacklist = sync.OnceValue(func() map[string]struct{} {
+	data, err := os.ReadFile("city_blacklist.conf")
+	if err != nil {
+		return map[string]struct{}{}
+	}
+	return parseCities(data)
+})
+
+func CityBlocked(city string) bool {
+	return getBlacklist()[city] // 首调初始化，之后直通
+}
+```
+
+`OnceValue` 把"零值 + Once + 函数"三件套压成一个值，语义与手写版一致（失败也只执行一次）。新代码里懒加载单例应当默认写这个形态，手写 `sync.Once` 样板留给需要自定义失败重试的场景。
 
 ## 业务实战
 
