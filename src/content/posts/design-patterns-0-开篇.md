@@ -12,9 +12,9 @@ draft: false
 
 运营提了个需求："把会员折扣挪到优惠券后面计算，另外加一种新促销，第二件 1 元。"你打开 `OrderService.go`，三千行，定价逻辑埋在第 1400 行的一个三层嵌套 if-else 里。你改了 4 处，自测通过，上线。
 
-大促当晚，客服电话被打爆： platinum 会员用券后的价格算错了，资损六位数。
+然后真实的问题来了：新促销上线后，"满 200 减 10 的券"和"满 2 件打 9 折"开始同时生效，两个优惠叠出来的价格击穿了运营核过的成本线。这不是 CloudShop 独有的倒霉——阿里的店铺优惠就为同一件事发过[升级公告](https://developer.alibaba.com/support/announcementDetail.htm?source=search&id=25828)：把优惠生效方式从"叠加"升级为"互斥择优"。优惠怎么叠、谁跟谁互斥，是促销系统公认的核心难点，[产品圈专门写过长文分析](https://www.woshipm.com/pd/4877172.html)。
 
-复盘时你盯着那段 if-else 想重构，但无从下手——改任何一处都可能引发另一处资损。最后你在这个函数上加了条注释：`// 别动这里，动了会出事`。
+复盘时你盯着那段 if-else 想重构，但无从下手——互斥判断和叠加顺序糊在同一团代码里，改任何一处都可能改错另一处。最后你在这个函数上加了条注释：`// 别动这里，动了会出事`。
 
 从这一刻起，代码开始腐烂。
 
@@ -29,6 +29,8 @@ draft: false
 Reddit 上有个高赞帖子，标题是[《学设计模式学到崩溃》](https://www.reddit.com/r/developersIndia/comments/1mfydex/frustrated_with_learning_all_of_the_design/)，一万多条回复都在说同一件事：背是背下来了，用不会。
 
 Martin Fowler 写过一篇[《Writing Software Patterns》](https://www.martinfowler.com/articles/writingPatterns.html)，里面有句话点破了本质：模式描述的是**情境中的力（forces）和取舍**，不是一步步照抄的菜谱。你没感受过那个"力"，就永远只是在抄菜谱。
+
+美团技术团队在自己的[《设计模式在外卖营销业务中的实践》](https://tech.meituan.com/2020/03/19/Software-design-pattern-practice-in-marketing.html)里说得更直白："如果脱离具体的业务逻辑去学习或者使用设计模式，那是极其空洞的。"他们是真的在营销业务里用工厂+策略算邀请返奖、用责任链做投放资源位过滤的——大厂给"业务级学模式"这条路线背了书。
 
 所以这个系列的教法反过来：**先疼，再重构，后命名**。每一篇都从一段你自己写过的烂代码开始，小步重构，直到模式自己浮出来——那一刻你重新发明了它，命名只是给它发身份证。这是 Joshua Kerievsky 在《Refactoring to Patterns》里的路线，也是被验证过最有效的学法。
 
@@ -69,9 +71,9 @@ func (s *OrderService) CreateOrder(req CreateOrderReq) error {
 
 疼在哪？运营改定价规则、仓促改库存策略、风控加规则、短信改文案——**四个团队，四个改它的理由**，都在 git blame 里撞车。一个模块改它的理由超过一个，它就在替四个东西背锅。
 
-### O · 开闭原则：加一种促销，改十二个文件
+### O · 开闭原则：优惠从"叠加"改成"互斥择优"，改不动
 
-CloudShop 加"N 元购"促销那天，你在 `calcPrice`、`refund`、`report`、`settle`……十二处 if-else 里各加了一个 case，其中两处漏了。对扩展开放、对修改关闭的意思是：**加新类型时，应该是加代码，而不是改一圈旧代码**。改旧代码每多一处，漏一处的概率就翻一倍。
+CloudShop v0 的优惠是无脑全叠加。运营后来要求：某些优惠不能叠加，要改成"互斥择优"——同一组里只生效对用户最优的一个。这不是运营刁难，就是开头阿里发公告改的那件事。而你的 `calcPrice` 里，叠加顺序和互斥判断糊在同一团 if-else 里，这种"规则级"的改动本该只动一处，现在得剖开整个函数重新理。对扩展开放、对修改关闭的意思是：**规则变化应该是加/换一块代码，而不是剖开一团代码**。每剖一次，改错一处的概率就翻一倍。
 
 ### L · 里氏替换：虚拟商品订单，把"发货"覆写成空
 
@@ -161,7 +163,7 @@ classDiagram
 
 空讲原则没用，这个系列会一直泡在一个业务系统里。
 
-**CloudShop**：一个虚构的中型电商平台。平台 + 商家入驻，实物商品为主，带虚拟商品和服务类商品。微信、支付宝、银联三家支付。促销体系有满减、折扣、N 元购、券、红包，可叠加。日订单五十万，大促峰值一小时二十万单——这个体量下，任何设计失误都会真实地疼。
+**CloudShop**：一个虚构的中型电商平台。平台 + 商家入驻，实物商品为主，带虚拟商品和服务类商品。微信、支付宝、银联三家支付。促销体系有满减、折扣、N 元购、券、红包，怎么叠加、谁跟谁互斥是运营的日常战场。日订单五十万，大促峰值一小时二十万单——这个体量下，任何设计失误都会真实地疼。
 
 ```mermaid
 flowchart LR
@@ -182,6 +184,8 @@ flowchart LR
 ```
 
 它的起点是大多数人真实的样子：一个跑得起来但不敢动的单体，`OrderService` 三千行，定价 if-else 三层嵌套，订单状态二十个分支。全系列二十四篇，就是把这个系统一步步造好——**每篇解决 CloudShop 的一个真实痛点，模式是重构的副产品**。
+
+CloudShop 是虚构的，但它的业务骨架不是编的：订单状态机参考[美团外卖订单中心的演进](https://tech.meituan.com/2016/09/09/mt-waimai-order-evolution.html)和[高德打车的订单状态机引擎设计](https://developer.aliyun.com/article/783803)；促销的叠加/互斥规则对齐开头那条[阿里升级公告](https://developer.alibaba.com/support/announcementDetail.htm?source=search&id=25828)和[促销系统的行业共识](https://www.woshipm.com/pd/4877172.html)；邀请返奖流程复刻[美团外卖营销的公开实践](https://tech.meituan.com/2020/03/19/Software-design-pattern-practice-in-marketing.html)；支付路由的决策因子（成功率、费率、限额、渠道状态）来自[美团支付通道自动化](https://tech.meituan.com/2017/10/27/pay-paygw-automation-system.html)和 [Stripe 的多网关实践](https://stripe.com/zh-sg/resources/more/multiple-payment-gateways-101-what-they-are-and-how-to-use-them)。每篇遇到"真实的系统是这么做的"，都会标出处。
 
 读到后面你会发现，CloudShop 的插件生态（商家在交易节点上挂自己的逻辑）正好就是你自己产品里"扩展点"该有的样子。业务是虚构的，疼是真的。
 
@@ -238,6 +242,7 @@ flowchart LR
 
 **参考来源**
 
+教学法：
 - Martin Fowler, *Writing Software Patterns* — 模式是力与权衡，不是菜谱
 - Joshua Kerievsky, *Refactoring to Patterns* — 先疼再重构后命名路线的出处
 - Jeff Atwood, *Rethinking Design Patterns*（Coding Horror）
@@ -245,3 +250,11 @@ flowchart LR
 - *Effective Go*（Go 官方）
 - 王争，《设计模式之美》（极客时间）— 面向对象→原则→模式→规范→重构的体系顺序
 - Refactoring.guru — 结构参考
+
+CloudShop 业务骨架取经：
+- 美团技术团队，《设计模式在外卖营销业务中的实践》— 工厂+策略算返奖、责任链做投放过滤，业务级学模式的官方印证
+- 阿里巴巴，《店铺优惠叠加规则升级公告》— 叠加升级为互斥择优的真实演进
+- 美团技术团队，《美团外卖订单中心的演进》— 订单状态流转与 MQ 通知
+- 高德，《通用可编排订单状态机引擎设计》— 状态多、链路长、多业务维度
+- 美团技术团队，《支付通道自动化管理的实践之路》+ Stripe 多网关 — 渠道路由决策因子
+- 《6000字看懂促销系统的底层逻辑》— 互斥规则是促销系统核心难点
