@@ -39,28 +39,28 @@ export const backgroundWallpaper: BackgroundWallpaperConfig = {
 	 *   "assets/images/MobileWallpaper/m2.avif",
 	 * ],
 	 */
-		src: {
-			// 桌面背景图片（真实风景，安静自然）
-			desktop: [
-				"assets/images/DesktopWallpaper/landscape1.jpg",
-				"assets/images/DesktopWallpaper/landscape2.jpg",
-				"assets/images/DesktopWallpaper/landscape3.jpg",
-				"assets/images/DesktopWallpaper/landscape4.jpg",
-				"assets/images/DesktopWallpaper/landscape5.jpg",
-				"assets/images/DesktopWallpaper/landscape6.jpg",
-			],
-			// 移动背景图片（真实风景，安静自然）
-			mobile: [
-				"assets/images/MobileWallpaper/mlandscape1.jpg",
-				"assets/images/MobileWallpaper/mlandscape2.jpg",
-				"assets/images/MobileWallpaper/mlandscape3.jpg",
-				"assets/images/MobileWallpaper/mlandscape4.jpg",
-				"assets/images/MobileWallpaper/mlandscape5.jpg",
-				"assets/images/MobileWallpaper/mlandscape6.jpg",
-			],
-			// 背景视频播放地址（已禁用）
-			playerUrl: [],
-		},
+	src: {
+		// 桌面背景图片（真实风景，安静自然）
+		desktop: [
+			"assets/images/DesktopWallpaper/landscape1.jpg",
+			"assets/images/DesktopWallpaper/landscape2.jpg",
+			"assets/images/DesktopWallpaper/landscape3.jpg",
+			"assets/images/DesktopWallpaper/landscape4.jpg",
+			"assets/images/DesktopWallpaper/landscape5.jpg",
+			"assets/images/DesktopWallpaper/landscape6.jpg",
+		],
+		// 移动背景图片（真实风景，安静自然）
+		mobile: [
+			"assets/images/MobileWallpaper/mlandscape1.jpg",
+			"assets/images/MobileWallpaper/mlandscape2.jpg",
+			"assets/images/MobileWallpaper/mlandscape3.jpg",
+			"assets/images/MobileWallpaper/mlandscape4.jpg",
+			"assets/images/MobileWallpaper/mlandscape5.jpg",
+			"assets/images/MobileWallpaper/mlandscape6.jpg",
+		],
+		// 背景视频播放地址（已禁用）
+		playerUrl: [],
+	},
 	// 横幅壁纸和全屏壁纸共享配置
 	common: {
 		// 壁纸遮罩暗度，让横幅文字显示更清晰，0-1之间，值越大越暗

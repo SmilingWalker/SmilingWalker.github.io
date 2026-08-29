@@ -15,18 +15,10 @@ export const siteConfig: SiteConfig = {
 	site_url: "https://SmilingWalker.github.io",
 
 	// 站点描述
-	description:
-		"个人技术博客，记录调研笔记与工程实践。",
+	description: "个人技术博客，记录调研笔记与工程实践。",
 
 	// 站点关键词
-	keywords: [
-		"技术博客",
-		"AI",
-		"WebGIS",
-		"JVM",
-		"调研笔记",
-		"工程实践",
-	],
+	keywords: ["技术博客", "AI", "WebGIS", "JVM", "调研笔记", "工程实践"],
 
 	// 主题色
 	themeColor: {
