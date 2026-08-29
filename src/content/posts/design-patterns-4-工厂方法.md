@@ -1,0 +1,173 @@
+---
+title: 设计模式（4）：工厂方法——从 switch 造对象，到注册表造对象
+published: 2026-08-30
+pinned: false
+description: ""
+tags: [design-patterns, go, factory, registry, cloudshop]
+category: 设计模式
+draft: false
+---
+
+[第 1 篇](/posts/design-patterns-1-策略模式/)留了个尾巴：定价引擎解决了"促销怎么算"，但"这个订单用哪些促销"仍然散落在一堆 if 里。这篇把这个尾巴连同它的孪生问题一起解决——**按类型造对象**。
+
+CloudShop 有三类订单：实物单（要物流）、虚拟单（会员卡/充值卡，发货即发码）、服务单（上门安装，要预约）。三类的创建、退款、结算逻辑各不相同。
+
+## v0：三处一模一样的 switch
+
+```go
+// order/create.go —— CloudShop v0
+func (s *Service) CreateOrder(t OrderType, req CreateReq) (*Order, error) {
+	var h OrderHandler
+	switch t {
+	case TypePhysical:
+		h = &PhysicalHandler{repo: s.repo, logistics: s.logistics}
+	case TypeVirtual:
+		h = &VirtualHandler{repo: s.repo, coder: s.coder}
+	case TypeService:
+		h = &ServiceHandler{repo: s.repo, scheduler: s.scheduler}
+	}
+	return h.Create(req)
+}
+```
+
+`Refund` 里一份同样的 switch，`Settle`（结算）里又一份。疼在两处：
+
+**构造细节泄露。** 每种 handler 需要什么依赖（物流客户端、发码器、预约系统）被创建方全部知道——调用方明明只想"下个单"。
+
+**三份 switch 演三份错。** 接"预约服务单"新类型那周，创建和结算的 switch 都加了 case，退款的漏了。服务单的退款走进了实物流程，仓库收到一张"虚拟商品的退货单"。三份拷贝的 switch，漏一份是概率问题，不是运气问题。
+
+## v1：简单工厂——new 至少只写一处
+
+```go
+func NewOrderHandler(t OrderType, deps Deps) (OrderHandler, error) {
+	switch t {
+	case TypePhysical:
+		return &PhysicalHandler{repo: deps.Repo, logistics: deps.Logistics}, nil
+	case TypeVirtual:
+		return &VirtualHandler{repo: deps.Repo, coder: deps.Coder}, nil
+	case TypeService:
+		return &ServiceHandler{repo: deps.Repo, scheduler: deps.Scheduler}, nil
+	default:
+		return nil, fmt.Errorf("unknown order type: %d", t)
+	}
+}
+```
+
+三处调用改成 `NewOrderHandler(t, deps)`，构造细节收拢，漏改的风险从"三处"降到"一处"。这是**简单工厂**（也叫静态工厂）——不是 GoF 23 个里的正式成员，却是日常最常用的形态。
+
+但开闭还没达成：加第四种订单类型，仍要修改这个工厂的 switch。工厂成了修改热点——所有新类型都往这一个文件里挤。
+
+## v2：注册表式工厂——加新类型零改动老代码
+
+把"类型 → 构造方式"的映射从 switch 硬编码改成运行时可写的注册表：
+
+```go
+// order/factory.go
+type HandlerFactory func(deps Deps) OrderHandler
+
+var handlerFactories = map[OrderType]HandlerFactory{}
+
+func RegisterOrderHandler(t OrderType, f HandlerFactory) {
+	handlerFactories[t] = f
+}
+
+func NewOrderHandler(t OrderType, deps Deps) (OrderHandler, error) {
+	f, ok := handlerFactories[t]
+	if !ok {
+		return nil, fmt.Errorf("no handler registered for type %d", t)
+	}
+	return f(deps), nil
+}
+
+// order/physical.go —— 每种类型自己注册
+func init() {
+	RegisterOrderHandler(TypePhysical, func(d Deps) OrderHandler {
+		return &PhysicalHandler{repo: d.Repo, logistics: d.Logistics}
+	})
+}
+```
+
+加"预约服务单" = 新建一个文件、实现 handler、`init` 里注册一行。`factory.go` 和三个旧文件**零改动**。v0 那个"漏一处退款 switch"的事故类别被整体消灭：不再存在需要同步修改的多份清单。
+
+## 命名时刻，以及一次诚实的澄清
+
+**工厂方法**在 GoF 里的原始定义是通过继承实现的：Creator 子类决定实例化哪个 Product。**Go 没有继承**，抄不了原版——但 v2 的注册表达成了完全相同的开闭意图。这正是[第 0 篇](/posts/design-patterns-0-开篇/)引 Fowler 那句话的实例：模式是力与权衡，语言不同，形状不同。Go 生态里"工厂"的惯用形态就是注册表。
+
+顺手把三个容易混的名字钉清楚（抽象工厂[第 11 篇](/posts/design-patterns-11-冷门三连/)细讲）：
+
+| 名字 | 管什么 | CloudShop 对应 |
+|---|---|---|
+| 简单工厂 | 一个函数里 switch 造对象 | v1 的 `NewOrderHandler` |
+| 工厂方法 | 把"造哪种"下放/开放出去，加类型不改工厂 | v2 的注册表 |
+| 抽象工厂 | 一次造**一族**相关对象 | 多币种账务族（第 11 篇） |
+
+```mermaid
+flowchart LR
+    subgraph 调用方
+        C1[CreateOrder] --> F[NewOrderHandler]
+        C2[Refund] --> F
+        C3[Settle] --> F
+    end
+    F -->|查表| R["handlerFactories<br/>map[OrderType]→Factory"]
+    subgraph 注册侧
+        P1[physical.go init] -->|Register| R
+        P2[virtual.go init] -->|Register| R
+        P3[service.go init] -->|Register| R
+        P4[预约单.go init 新增只加不改] -->|Register| R
+    end
+    R --> H[OrderHandler 实现]
+```
+
+## 你天天在用
+
+Go 标准库把这个模式用成了基础设施级惯例：
+
+**`database/sql` 的 `sql.Register`。** 写过 `_ "github.com/go-sql-driver/mysql"` 吗？这个 blank import 的唯一作用是执行驱动包的 `init()`，里面调用 `sql.Register("mysql", &MySQLDriver{})` 把自己注册进全局驱动表。`sql.Open("mysql", dsn)` 查表拿驱动——`sql.Open` 从不知道 mysql 的存在。加新数据库 = 加一个 import，标准库零改动。
+
+**`image.RegisterFormat`。** png、jpeg、gif 各自的包在 `init()` 里注册格式名和解码器，`image.Decode` 靠注册表识别格式。你 `import _ "image/png"` 的那一刻，就是在参与一次工厂注册。
+
+**你写过的每一个 blank import，都是一次安静的工厂调用。**
+
+## 业务实战：美团的策略工厂
+
+美团返奖系统里策略的选取（[《设计模式在外卖营销业务中的实践》](https://tech.meituan.com/2020/03/19/Software-design-pattern-practice-in-marketing.html)）就是工厂的现场：`FactorRewardStrategyFactory` 持有策略名到策略类的映射，按用户属性查出策略名、从工厂取策略执行。他们的实现用了 Java 反射（`Class.forName().newInstance()`）；CloudShop 的 v2 用 map 存构造函数——**同一个意图，语言惯用形状不同**，这也回应了第 0 篇"Go 学模式先拆 Java 习惯"：不抄反射，用注册表。
+
+第 1 篇的尾巴在这篇收掉：定价引擎的 `[]Promotion` 从哪来？促销类型注册表 + 数据库配置（类型、参数、互斥组、优先级），启动时查表组装。策略管算法，工厂管选择，两边各自变化。
+
+## 好处与代价
+
+| 好处 | 代价 |
+|---|---|
+| 加类型只增不改（开闭） | "隐藏的接线"：新人 grep `NewOrderHandler` 找不到谁注册了预约单 |
+| 构造细节收拢，调用方只懂抽象 | import 副作用：注册发生在 `init()`，顺序依赖要小心 |
+| 三份 switch 合并为一份真理 | 未注册类型的错误延迟到运行时（编译器不再帮你查 switch 漏 case） |
+| 标准库同款，Go 工程师都认识 | map 本身无序，若顺序有意义要另行处理 |
+
+## 什么时候不要用
+
+- **类型少且稳定**：三个 case 的 switch 直白、可跳转、编译期查漏，没罪。为"可能的扩展"提前建注册表，是模式瘾的典型发作。
+- **只在一个地方造对象**：一处调用的 switch 收进简单工厂都嫌多余，何况注册表。
+- **依赖注入框架在场**：团队已经用 wire/fx 管组装时，对象图的构造交给框架，手写注册表反而制造两套真理。
+- Rob Pike 的告诫再念一遍：a little copying is better than a little dependency。三行重复的 switch，好过一套为消灭它而生的注册机制。
+
+## 易混淆
+
+**工厂 vs 建造者**（[第 2 篇](/posts/design-patterns-2-建造者与函数选项/)）：工厂回答"造**哪一种**"，建造者回答"这一种**怎么配**"。造哪种订单是工厂，配十二个查询条件是建造者，两者经常串联：工厂造出 handler，建造者配它的参数。
+
+**工厂 vs 注册表**（[第 20 篇](/posts/design-patterns-20-注册表/)）：这篇的注册表既是工厂的实现手段，本身也是一个独立模式（服务发现、插件系统）。工厂视角看它"造对象"，注册表视角看它"管理映射"。同一结构，两个意图，第 20 篇从另一个视角重游。
+
+## 自测
+
+1. v0 的事故（退款 switch 漏改）在 v1 里风险降了多少？为什么 v2 能把这类事故**整体**消灭而不是降低概率？
+2. `_ "github.com/go-sql-driver/mysql"` 这个 blank import 拆开来看，注册表模式里每个角色分别由什么承担？
+3. 美团用反射、CloudShop 用 map 注册，两者在"力与意图"上哪里相同？Go 不用反射的理由是什么？
+4. 什么时候"三行重复 switch"优于注册表？给一个你项目里的判断实例。
+
+---
+
+**参考来源**
+
+- GoF, *Design Patterns* — 工厂方法定义（继承形态）；Go 语境下的形态转换
+- Go 标准库 `database/sql.Register`、`image.RegisterFormat` 源码 — 注册表式工厂的官方实现
+- Refactoring.guru, [Factory Method](https://refactoring.guru/design-patterns/factory-method)
+- 美团技术团队，《设计模式在外卖营销业务中的实践》— `FactorRewardStrategyFactory` 真实实现
