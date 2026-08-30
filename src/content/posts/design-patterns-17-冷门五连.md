@@ -111,6 +111,15 @@ for o := range Orders(ctx, db) {
 
 分页游标、批量拉取、`yield` 返回 false 即中断——标准库 `iter.Seq` 是迭代器在 Go 的现代形态，`range over func` 让它与语言无缝焊接。
 
+**遍历时增删：Go 官方承认的未决行为。** Go 语言规范对 map 遍历中增删写着：删除尚未到达的条目，对应的迭代值**不会**产出；遍历中新建的条目，**可能产出也可能跳过**。这不是文档疏漏，是和 Java 走了不同的路——Java 用 modCount 计数做 fail-fast（遍历中改动直接抛 ConcurrentModificationException，把未决变成确定报错），Go 的规范**直接承认未决**，把责任交给写代码的人。于是 Go 的惯用法是防御性的：要边遍历边删，先拷贝再改——
+
+```go
+for k := range m { keys = append(keys, k) } // 先快照
+for _, k := range keys { delete(m, k) }      // 再修改
+```
+
+王争讲快照迭代器时用双时间戳（addTimestamp/delTimestamp，标记删除不真删）实现了"不拷贝容器的快照"，思路接近数据库 MVCC；Go 侧的对应物其实在第 3 篇出现过——促销策略表热更新"构建新对象再原子换引用"，就是整个容器的快照切换。切片的语义又不同：`range` 的长度在进入循环时定格，之后 append 的元素不一定被看到——同样是规范承认的未决。**结论：在 Go 里"遍历时改集合"没有侥幸，要么快照、要么换引用，规范不兜底。**
+
 ### 何时不用
 
 绝大多数时候：切片 + range 就是答案。`iter.Seq` 留给惰性大数据集和自定义流。
@@ -206,3 +215,4 @@ Go 的实现要用**类型断言替代双分派**（Go 没有方法重载）：�
 - `iter` 包（Go 1.23）、`go/ast.Inspect` — 迭代器与访问者的标准库形态
 - Kubernetes rollout undo / git stash — 备忘录的工程样本
 - 《6000字看懂促销系统的底层逻辑》— 真实促销规则以结构化配置为主的事实
+- 王争《设计模式之美》（迭代器三篇）— 未决行为、Java modCount fail-fast 源码、快照双时间戳方案

@@ -53,6 +53,7 @@ draft: false
 
 - **一次性的脚本和迁移工具**：跑完就丢的东西，直接写。给它上策略模式相当于给一次性纸杯雕花。
 - **探索期的代码**：新产品连业务方向都在摇摆，抽象锁住的是错误的理解。等业务稳了再抽，[Kerievsky 的顺序](https://refactoring.guru/design-patterns)永远是先有疼后有结构。
+- **DRY 的三重复**（王争的辨析，防止"看见重复就抽"的膝跳）：**逻辑重复**（两段代码长得一样，但语义不同）不违反 DRY——用户名校验和密码校验逐行相同，合并成 `isValidUserNameOrPassword` 反而是错的，密码规则一变又得拆回去；**语义重复**（代码长得不同、干的是同一件事——两个同事各写了一个 IP 校验）违反，规则一改只改一处就埋 bug；**执行重复**（同一逻辑被重复执行——登录流程里 email 校验跑了两次、查了两次库）违反，最隐蔽。判断的口诀：**抽之前先问语义，再看执行**，长得像不像最不重要。
 - **三次法则（Rule of Three）**：Fowler 在《Refactoring》里提出的经验法则——同样的东西出现第三次，才值得抽象。第一次写，第二次容忍重复（复制是廉价的），第三次抽。前两次的"丑"是付给未来判断力的学费。
 - **Rob Pike 的老三样**：a little copying is better than a little dependency（一点复制好过一点依赖）；clear is better than clever；simplicity is prerequisite for reliability。Go 标准库把这三条写进了气质里——`strings.Repeat` 才三行，没人觉得它该抽什么模式。
 
@@ -120,3 +121,4 @@ CloudShop 的故事讲完了，但它对应的那些真实系统（美团返奖�
 - Martin Fowler, *Rule of Three* / *Writing Software Patterns* — 三次法则与"模式是力"
 - Joshua Kerievsky, *Refactoring to Patterns* — 先重构后模式的顺序
 - Rob Pike, *Go Proverbs* — 少即是指数级多
+- 王争《设计模式之美》（DRY/规范篇）— 三种重复的辨析（逻辑/语义/执行）

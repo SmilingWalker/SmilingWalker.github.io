@@ -131,6 +131,18 @@ return errors.Join(errs...) // Go 1.20+ 错误聚合
 
 `authMiddleware` 能 401 短路 → 它在承担链的语义；`loggingMiddleware` 只记录不拦截 → 它是纯粹的装饰器。一条"链"上混着两者，在 Go 里完全正常——命名时按层的实际语义叫 middleware，辨析时按中断权归类。
 
+### 同一模式的三种工程形态
+
+王争对比 Servlet Filter、Spring Interceptor、MyBatis Plugin 后提炼出责任链的三种实现路径，翻译成 Go 生态恰好也齐：
+
+| 形态 | 代表 | Go 对应 | 特征 |
+|---|---|---|---|
+| 数组迭代 | Spring Interceptor（拆 pre/post 两函数） | 本文 v1/v2 的 `[]Rule` 循环 | 结构最简，单向裁决 |
+| 递归穿透 | Tomcat FilterChain（`doFilter(req, resp, chain)` 把链自己传下去） | chi/gin 的 `handler(next)` 模式：`next()` 前后都能插代码 | **双向拦截**（请求前+响应后） |
+| 嵌套包裹 | MyBatis Plugin（嵌套动态代理，每层代理包一个拦截器） | 第 5 篇的闭包洋葱 `loggingMiddleware(authMiddleware(h))` | Go 不需要代理，闭包即是 |
+
+判断特征选形态：只要"拦/放"的单向裁决选数组；要**在响应回来时再做点事**（记耗时、改响应头）选递归穿透——`next()` 之前的代码处理请求、之后的代码处理响应，这正是 gin 中间件能量所在；给行为层层加料且保接口形状，选闭包洋葱（那其实是装饰器回访）。三种形态在 Go 里都活着，选错形态的代价是把双向需求硬塞进单向数组——只能再开一条"响应链"，重复遍历。
+
 [第 15 篇](/posts/design-patterns-15-模板方法/)的辨析也顺手结清：模板的顺序**编译期锁死**（支付七步不许运营改序），链的顺序**运行期装配**（风控规则大促要调序）。锁不锁顺序，是选型的分水岭。
 
 ```mermaid
@@ -197,3 +209,4 @@ CloudShop 落地两条链：风控拦截链（v2 接口形态，带拦截环记�
 - GoF, *Design Patterns* — 责任链原始定义
 - `image.Decode` 注册解码器、`net/http` 中间件生态（negroni/chi/gin）— 结构同源的两种形态
 - 美团技术团队，《设计模式在外卖营销业务中的实践》— 投放资源位过滤链的选型观察
+- 王争《设计模式之美》（职责链两篇）— Tomcat 递归/Spring 拆函数/MyBatis 嵌套代理的三实现对比
