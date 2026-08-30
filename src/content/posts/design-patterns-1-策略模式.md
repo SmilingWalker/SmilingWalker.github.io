@@ -8,11 +8,13 @@ category: 设计模式
 draft: false
 ---
 
-接[第 0 篇](/posts/design-patterns-0-开篇/)的现场。运营的需求单躺在桌上：
+接[第 0 篇](/posts/design-patterns-0-开篇/)的现场。CloudShop——这个系列从头用到尾的虚构电商——运营的需求单躺在桌上：
 
 > 双 12 大促：满 300 减 80、满 100 减 20；PLUS 会员全场 95 折；但**满减和会员折扣互斥择优**——哪个对用户更便宜走哪个；红包不受影响，照常叠加。
 
-互斥择优不是运营刁难。阿里的店铺优惠系统就为同一件事发过[升级公告](https://developer.alibaba.com/support/announcementDetail.htm?source=search&id=25828)：从"叠加"（满 200 减 10 的券 + 满 2 件 9 折同时生效）升级为"互斥择优"。[促销系统的产品分析](https://www.woshipm.com/pd/4877172.html)把互斥规则称为促销系统的核心难点。现在这个难点落在了 CloudShop 的 `calcPrice` 上。
+互斥择优不是运营刁难。阿里的店铺优惠系统就为同一件事发过[升级公告](https://developer.alibaba.com/support/announcementDetail.htm?source=search&id=25828)：从"叠加"（满 200 减 10 的券 + 满 2 件 9 折同时生效）升级为"互斥择优"。[促销系统的产品分析](https://www.woshipm.com/pd/4877172.html)把互斥规则称为促销系统的核心难点。
+
+行业级的难点，落到每家电商头上，都会砸在同一个地方：那个把所有优惠算成最终实付价的函数。CloudShop 里这个函数叫 `calcPrice`——满减、会员折扣、券、红包全在里面按写死的顺序层层相减，谁跟谁互斥的判断也糊在里面。运营的这张需求单，考验的就是这几十行代码。
 
 ## v0：那段所有人都写过的代码
 
@@ -317,14 +319,25 @@ type RoundTripper interface {
 
 ## 业务实战：真实大厂的策略落地
 
-美团外卖的"邀请下单"返奖是策略模式在营销业务里的公开样本（[《设计模式在外卖营销业务中的实践》](https://tech.meituan.com/2020/03/19/Software-design-pattern-practice-in-marketing.html)）：
+美团的"邀请下单"返奖是策略模式在营销业务里的公开样本（[《设计模式在外卖营销业务中的实践》](https://tech.meituan.com/2020/03/19/Software-design-pattern-practice-in-marketing.html)）。业务本身不复杂：用户 A 邀请用户 B，B 完成下单后，平台给 A 一笔现金奖励。复杂的是"给多少"：新用户有普通奖励（固定金额）和梯度奖励（邀请人数越多奖得越多）两种方案；老用户按用户属性套不同的返奖机制——原文的说法是"为了评估不同的邀新效果，老用户返奖会存在多种返奖机制"。这类策略随运营实验增增减减，美团在文中给营销业务下过一个判断：需求"随着市场、用户、环境的变化而多变"，和交易这类稳定业务不同，天生需要易扩展的系统。
 
-- 新用户：普通奖励（固定金额）、梯度奖励（邀请人数越多奖越多）
-- 老用户：按用户属性套不同返奖机制
+他们的落地结构和 CloudShop 的引擎同构，多出来的一个细节正好补齐本篇没讲的角落。抽象层是一个抽象类 `RewardStrategy`：
 
-美团的做法与 CloudShop 的引擎同构：`RewardStrategy` 抽象（`reward()` 算金额 + `insertRewardAndSettlement()` 落库结算），加新返奖策略 = 加一个实现类，其余不动；策略的选择交给一个工厂（这篇的伏笔，[第 4 篇](/posts/design-patterns-4-工厂方法/)细讲）。
+```java
+// 按美团原文结构复原（注释为原文注释，实现体略）
+public abstract class RewardStrategy {
+    public abstract void reward(long userId);                        // 各策略自己的计算
+    public void insertRewardAndSettlement(long userId, int reward) { // 更新用户信息以及结算
+        // 公共逻辑：所有奖励都一样
+    }
+}
+```
 
-CloudShop 这边的落地形态：促销策略表存数据库（类型、参数、互斥组、优先级），运营在后台配置，启动时加载成 `[]Promotion`。运营"一天改三次规则"改的是数据，不是代码。
+值得咀嚼的是第二个方法不是 abstract：**"算多少钱"开放给子类，"入账 + 通知结算服务"作为公共步骤下沉到基类**——原文的理由是"这两个模块对于所有的奖励来说都是一样的"。这个"公共步骤上提、可变步骤下放"的形状，原文没有给它命名，但它正是[第 15 篇](/posts/design-patterns-15-模板方法/)模板方法的核心动作——策略和模板在这一个类里握手：变的做成抽象方法，不变的沉到基类。
+
+执行链路：主流程 `InviteRewardImpl.sendReward` 查出被邀请人、按用户类型选定策略类，交给工厂实例化，再包进 `RewardContext`，由它的 `doStrategy` 依次执行"算金额 → 入账 → 结算"。选择和执行分开，策略本身只懂计算；"从类到对象"这一步交给了谁，是[第 4 篇](/posts/design-patterns-4-工厂方法/)的正题。
+
+CloudShop 这边的落地形态：促销策略表存数据库（类型、参数、互斥组、优先级），运营在后台配置，启动时加载成 `[]Promotion`。和美团"加一种返奖 = 实现一个 `RewardStrategy`"同理——运营"一天改三次规则"改的是数据，不是代码。
 
 ## 好处与代价
 

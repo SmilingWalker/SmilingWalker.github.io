@@ -154,9 +154,29 @@ func Register(name string, driver driver.Driver) {
 
 ## 业务实战：美团的策略工厂
 
-美团返奖系统里策略的选取（[《设计模式在外卖营销业务中的实践》](https://tech.meituan.com/2020/03/19/Software-design-pattern-practice-in-marketing.html)）就是工厂的现场：`FactorRewardStrategyFactory` 持有策略名到策略类的映射，按用户属性查出策略名、从工厂取策略执行。他们的实现用了 Java 反射（`Class.forName().newInstance()`）；CloudShop 的 v2 用 map 存构造函数——**同一个意图，语言惯用形状不同**，这也回应了第 0 篇"Go 学模式先拆 Java 习惯"：不抄反射，用注册表。
+第 1 篇留的线索在这里兑现：返奖策略有了好几个实现，**"这一次用哪个"谁来管**？美团返奖系统（[《设计模式在外卖营销业务中的实践》](https://tech.meituan.com/2020/03/19/Software-design-pattern-practice-in-marketing.html)）把这件事交给了工厂。结构分两层：抽象工厂 `StrategyFactory` 定契约——`createStrategy(Class c)` 进策略类、出策略实例；具体工厂 `FactorRewardStrategyFactory` 实现它，用的是 Java 反射：
 
-第 1 篇的尾巴在这篇收掉：定价引擎的 `[]Promotion` 从哪来？促销类型注册表 + 数据库配置（类型、参数、互斥组、优先级），启动时查表组装。策略管算法，工厂管选择，两边各自变化。
+```java
+// 按美团原文结构复原（异常处理从简）
+public class FactorRewardStrategyFactory extends StrategyFactory {
+    @Override
+    public RewardStrategy createStrategy(Class c) {
+        RewardStrategy product = null;
+        try {
+            product = (RewardStrategy) Class.forName(c.getName()).newInstance();
+        } catch (Exception e) {
+            // 原文此处异常被吞掉
+        }
+        return product;
+    }
+}
+```
+
+调用方是主流程 `InviteRewardImpl.sendReward`：查出被邀请人、判断新老用户、选定策略类，再交给工厂产出实例。**"选哪个类"的判断在调用方，工厂负责"从类到对象"这一步**——选择没有魔法，只是被搬到了一个专职的位置。
+
+这段代码值得盯着看一会儿，两处妥协都是 Java 习惯的产物。其一，反射拿实例：类在运行时才被加载和构造，绕过了编译期检查；异常被 catch 后吞掉、返回 null，调用方拿到的是颗哑弹。其二，工厂里没有缓存也没有注册表，每次调用都反射新建实例。Go 的惯用形状不这么写——v2 的 map 存构造函数：类型在编译期就被 `func() Promotion` 签名约束，拼错 key 是查表 miss 而不是运行时崩溃，构造函数本身即注册。**同一个意图，语言惯用形状不同**，这也回应第 0 篇"Go 学模式先拆 Java 习惯"：学的是"创建要收口"这个意图，不是抄反射的实现。
+
+第 1 篇的另一个尾巴也在这篇收掉：定价引擎的 `[]Promotion` 从哪来？促销类型注册表 + 数据库配置（类型、参数、互斥组、优先级），启动时查表组装。策略管算法，工厂管选择，两边各自变化。
 
 ## 好处与代价
 
